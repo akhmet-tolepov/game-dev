@@ -20,3 +20,6 @@
 *.opendb
 *.IDB
 Final project/.vsconfig
+.vs/
+.idea/
+*.vsdx
