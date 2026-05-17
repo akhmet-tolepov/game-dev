@@ -7,7 +7,9 @@ public class PlayerController : MonoBehaviour
     // ─────────────────────────────────────────────
     [Header("References")]
     [SerializeField] Animator animator;
-    [SerializeField] Transform playerObj;
+    [SerializeField] Transform playerObj;       // Visual mesh to rotate
+    [SerializeField] Transform cameraTransform; // Main Camera
+
     CharacterController controller;
 
     // ─────────────────────────────────────────────
@@ -27,15 +29,17 @@ public class PlayerController : MonoBehaviour
     //  GRAVITY
     // ─────────────────────────────────────────────
     [Header("Gravity")]
-    [SerializeField] float gravity   = 16f;
+    [SerializeField] float gravity = 20f;
     float verticalVelocity;
 
     // ─────────────────────────────────────────────
     //  JUMP SETTINGS
     // ─────────────────────────────────────────────
     [Header("Jump Settings")]
-    [SerializeField] float jumpHeight = 2f;
-    bool jumped;
+    [SerializeField] float jumpHeight   = 4f;    // Higher than before (was 2)
+    [SerializeField] float jumpCooldown = 0.4f;  // Prevents the isGrounded-flicker double-jump bug
+    bool  jumpRequested;
+    float lastJumpTime = -999f;
 
     // ─────────────────────────────────────────────
     //  PRIVATE STATE
@@ -49,7 +53,10 @@ public class PlayerController : MonoBehaviour
     void Start()
     {
         controller = GetComponent<CharacterController>();
-        if (animator == null) animator = GetComponent<Animator>();
+        animator   = GetComponent<Animator>();
+
+        if (cameraTransform == null && Camera.main != null)
+            cameraTransform = Camera.main.transform;
     }
 
     // ─────────────────────────────────────────────
@@ -60,16 +67,33 @@ public class PlayerController : MonoBehaviour
         // Read WASD input
         float h = Input.GetAxisRaw("Horizontal");
         float v = Input.GetAxisRaw("Vertical");
-        inputMove = new Vector3(h, 0f, v).normalized;
 
-        // Sprint — hold Left Shift
+        // Camera-relative movement
+        if (cameraTransform != null)
+        {
+            Vector3 camForward = cameraTransform.forward;
+            Vector3 camRight   = cameraTransform.right;
+            camForward.y = 0f;
+            camRight.y   = 0f;
+            camForward.Normalize();
+            camRight.Normalize();
+
+            inputMove = (camForward * v + camRight * h).normalized;
+        }
+        else
+        {
+            inputMove = new Vector3(h, 0f, v).normalized;
+        }
+
+        // Sprint
         sprint = Input.GetKey(KeyCode.LeftShift) ? 1f : 0f;
 
-        // Jump — Space
+        // Jump input — only QUEUE the request here.
+        // The actual jump fires in FixedUpdate so it can't double-trigger.
         if (Input.GetButtonDown("Jump"))
-            Jump();
+            jumpRequested = true;
 
-        // Rotate player model toward movement direction
+        // Rotate visual mesh toward movement direction
         if (inputMove != Vector3.zero && playerObj != null)
         {
             Quaternion targetRot = Quaternion.LookRotation(inputMove);
@@ -88,90 +112,74 @@ public class PlayerController : MonoBehaviour
     }
 
     // ─────────────────────────────────────────────
-    //  VERTICAL FORCE CALCULATOR
-    // ─────────────────────────────────────────────
-    float VerticalForceCalculator()
-    {
-        if (controller.isGrounded)
-        {
-            verticalVelocity = -1f;
-
-            if (jumped)
-                verticalVelocity = Mathf.Sqrt(jumpHeight * gravity * 2f);
-        }
-        else
-        {
-            verticalVelocity -= gravity * Time.deltaTime;
-        }
-
-        return verticalVelocity;
-    }
-
-    // ─────────────────────────────────────────────
     //  GROUND MOVEMENT
     // ─────────────────────────────────────────────
     void GroundMovement()
     {
         moveDir = inputMove;
 
-        animator.SetBool("Grounded", true);
-        animator.SetBool("FreeFall", false);
-        animator.SetBool("Jumping",     false);
+        // "Stable grounded" = on the ground AND not in jump cooldown.
+        // This ignores the one-frame isGrounded flicker that causes double jumps.
+        bool stableGrounded = controller.isGrounded
+                              && Time.time - lastJumpTime > jumpCooldown;
+
+        // Animator states
+        animator.SetBool("Grounded", stableGrounded);
+        animator.SetBool("FreeFall", !stableGrounded && verticalVelocity < 0f);
+        animator.SetBool("Jumping",  !stableGrounded && verticalVelocity > 0f);
 
         if (controller.isGrounded)
         {
-            jumped = false;
+            // Pick target speed: idle / walk / sprint
+            float targetSpeed = (sprint > 0) ? sprintSpeed : walkSpeed;
+            if (moveDir == Vector3.zero) targetSpeed = idle;
 
-            if (sprint > 0)
-            {
-                if (moveDir != Vector3.zero)
-                {
-                    speed = Mathf.Lerp(speed, sprintSpeed, sprintTransitSpeed * Time.deltaTime);
-                    animator.SetFloat("Speed", speed);
-                }
-                else
-                {
-                    speed = Mathf.Lerp(speed, idle, sprintTransitSpeed * Time.deltaTime);
-                    animator.SetFloat("Speed", speed);
-                }
-            }
-            else
-            {
-                if (moveDir != Vector3.zero)
-                {
-                    speed = Mathf.Lerp(speed, walkSpeed, sprintTransitSpeed * Time.deltaTime);
-                    animator.SetFloat("Speed", speed);
-                }
-                else
-                {
-                    speed = Mathf.Lerp(speed, idle, sprintTransitSpeed * Time.deltaTime);
-                    animator.SetFloat("Speed", speed);
-                }
-            }
+            speed = Mathf.Lerp(speed, targetSpeed, sprintTransitSpeed * Time.deltaTime);
+            animator.SetFloat("Speed", speed);
 
             moveDir *= speed;
         }
-        else if (!jumped && !controller.isGrounded)
+        else
         {
-            animator.SetBool("FreeFall", true);
             moveDir *= airSpeed;
         }
 
+        // Vertical velocity (gravity + jump)
         moveDir.y = VerticalForceCalculator();
+
         controller.Move(moveDir * Time.deltaTime);
+
+        // Consume the jump request AFTER move, so each Space press triggers exactly one jump
+        jumpRequested = false;
     }
 
     // ─────────────────────────────────────────────
-    //  JUMP
+    //  VERTICAL FORCE CALCULATOR
     // ─────────────────────────────────────────────
-    void Jump()
+    float VerticalForceCalculator()
     {
-        if (!controller.isGrounded) return;
+        // Only consider the player grounded for jump purposes if cooldown has elapsed
+        bool stableGrounded = controller.isGrounded
+                              && Time.time - lastJumpTime > jumpCooldown;
 
-        jumped           = true;
-        verticalVelocity = Mathf.Sqrt(jumpHeight * gravity * 2f);
+        if (stableGrounded)
+        {
+            // Stick to ground with a small downward force
+            verticalVelocity = -2f;
 
-        animator.SetBool("Grounded", false);
-        animator.SetBool("Jump",     true);
+            // Jump only fires here, only when stable-grounded, only when requested
+            if (jumpRequested)
+            {
+                verticalVelocity = Mathf.Sqrt(jumpHeight * gravity * 2f);
+                lastJumpTime     = Time.time;
+            }
+        }
+        else
+        {
+            // In the air — apply gravity continuously
+            verticalVelocity -= gravity * Time.deltaTime;
+        }
+
+        return verticalVelocity;
     }
 }
