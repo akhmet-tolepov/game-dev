@@ -36,14 +36,10 @@ public class PlayerController : MonoBehaviour
     //  JUMP SETTINGS
     // ─────────────────────────────────────────────
     [Header("Jump Settings")]
-    [SerializeField] float jumpHeight        = 4f;
-    [SerializeField] float jumpCooldown      = 0.4f;
-    // Coyote time: how long after losing ground contact we still treat her as "grounded".
-    // This is what kills the bump-induced fake-jumps. Increase if she still flickers.
-    [SerializeField] float coyoteTime        = 0.15f;
+    [SerializeField] float jumpHeight   = 4f;    // Higher than before (was 2)
+    [SerializeField] float jumpCooldown = 0.4f;  // Prevents the isGrounded-flicker double-jump bug
     bool  jumpRequested;
-    float lastJumpTime    = -999f;
-    float lastGroundedTime = -999f;
+    float lastJumpTime = -999f;
 
     // ─────────────────────────────────────────────
     //  PRIVATE STATE
@@ -92,7 +88,8 @@ public class PlayerController : MonoBehaviour
         // Sprint
         sprint = Input.GetKey(KeyCode.LeftShift) ? 1f : 0f;
 
-        // Jump input — queue it; actual jump runs in FixedUpdate
+        // Jump input — only QUEUE the request here.
+        // The actual jump fires in FixedUpdate so it can't double-trigger.
         if (Input.GetButtonDown("Jump"))
             jumpRequested = true;
 
@@ -111,23 +108,7 @@ public class PlayerController : MonoBehaviour
     // ─────────────────────────────────────────────
     void FixedUpdate()
     {
-        // Update grounded-time tracking
-        if (controller.isGrounded)
-            lastGroundedTime = Time.time;
-
         GroundMovement();
-    }
-
-    // ─────────────────────────────────────────────
-    //  Helper: is she "effectively grounded" right now?
-    //  This is the KEY fix: treats her as grounded if she was on the ground
-    //  any time in the last `coyoteTime` seconds. Brief bump-induced gaps
-    //  in controller.isGrounded no longer cause the animator to flicker.
-    // ─────────────────────────────────────────────
-    bool IsEffectivelyGrounded()
-    {
-        return Time.time - lastGroundedTime <= coyoteTime
-               && Time.time - lastJumpTime > jumpCooldown;
     }
 
     // ─────────────────────────────────────────────
@@ -137,17 +118,19 @@ public class PlayerController : MonoBehaviour
     {
         moveDir = inputMove;
 
-        bool effectivelyGrounded = IsEffectivelyGrounded();
+        // "Stable grounded" = on the ground AND not in jump cooldown.
+        // This ignores the one-frame isGrounded flicker that causes double jumps.
+        bool stableGrounded = controller.isGrounded
+                              && Time.time - lastJumpTime > jumpCooldown;
 
-        // Animator states — these now use coyote-time grounded, so tiny bumps
-        // don't flip her into "FreeFall" for a frame.
-        animator.SetBool("Grounded", effectivelyGrounded);
-        animator.SetBool("FreeFall", !effectivelyGrounded && verticalVelocity < 0f);
-        animator.SetBool("Jumping",  !effectivelyGrounded && verticalVelocity > 0f);
+        // Animator states
+        animator.SetBool("Grounded", stableGrounded);
+        animator.SetBool("FreeFall", !stableGrounded && verticalVelocity < 0f);
+        animator.SetBool("Jumping",  !stableGrounded && verticalVelocity > 0f);
 
-        if (effectivelyGrounded)
+        if (controller.isGrounded)
         {
-            // Pick target speed
+            // Pick target speed: idle / walk / sprint
             float targetSpeed = (sprint > 0) ? sprintSpeed : walkSpeed;
             if (moveDir == Vector3.zero) targetSpeed = idle;
 
@@ -158,7 +141,6 @@ public class PlayerController : MonoBehaviour
         }
         else
         {
-            // Truly in the air — preserve horizontal momentum at air speed
             moveDir *= airSpeed;
         }
 
@@ -167,7 +149,7 @@ public class PlayerController : MonoBehaviour
 
         controller.Move(moveDir * Time.deltaTime);
 
-        // Consume the jump request after move
+        // Consume the jump request AFTER move, so each Space press triggers exactly one jump
         jumpRequested = false;
     }
 
@@ -176,27 +158,25 @@ public class PlayerController : MonoBehaviour
     // ─────────────────────────────────────────────
     float VerticalForceCalculator()
     {
-        bool effectivelyGrounded = IsEffectivelyGrounded();
+        // Only consider the player grounded for jump purposes if cooldown has elapsed
+        bool stableGrounded = controller.isGrounded
+                              && Time.time - lastJumpTime > jumpCooldown;
 
-        if (effectivelyGrounded)
+        if (stableGrounded)
         {
-            // Glue her to the ground. Stronger downward push helps her stay
-            // stuck on slopes and tiny bumps without bouncing.
-            verticalVelocity = -5f;
+            // Stick to ground with a small downward force
+            verticalVelocity = -2f;
 
-            // Process jump
+            // Jump only fires here, only when stable-grounded, only when requested
             if (jumpRequested)
             {
                 verticalVelocity = Mathf.Sqrt(jumpHeight * gravity * 2f);
                 lastJumpTime     = Time.time;
-                // Force her into the air immediately so coyote time doesn't
-                // re-ground her on the next frame.
-                lastGroundedTime = -999f;
             }
         }
         else
         {
-            // Apply gravity continuously
+            // In the air — apply gravity continuously
             verticalVelocity -= gravity * Time.deltaTime;
         }
 
